@@ -18,6 +18,7 @@ package resolver_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -379,10 +380,11 @@ func TestGetURIDestinationV1Beta1(t *testing.T) {
 
 func TestGetURIDestinationV1(t *testing.T) {
 	tests := map[string]struct {
-		objects []runtime.Object
-		dest    duckv1.Destination
-		wantURI string
-		wantErr string
+		objects         []runtime.Object
+		dest            duckv1.Destination
+		customResolvers []resolver.URIResolverFunc
+		wantURI         string
+		wantErr         string
 	}{"nil everything": {
 		wantErr: "destination missing Ref and URI, expected at least one",
 	}, "Happy URI with path": {
@@ -532,13 +534,28 @@ func TestGetURIDestinationV1(t *testing.T) {
 		}, "notFound k8s service": {
 			dest:    duckv1.Destination{Ref: k8sServiceRef()},
 			wantErr: fmt.Sprintf("services %q not found", addressableName),
+		}, "with sample resolver": {
+			dest:            duckv1.Destination{Ref: k8sServiceRef()},
+			customResolvers: []resolver.URIResolverFunc{sampleURIResolver},
+			wantURI:         "ref://" + addressableName + ".Service.v1",
+		}, "happy ref with sample resolver": {
+			objects: []runtime.Object{
+				getAddressable(),
+			},
+			dest:            duckv1.Destination{Ref: addressableKnativeRef()},
+			wantURI:         addressableDNS,
+			customResolvers: []resolver.URIResolverFunc{sampleURIResolver},
+		}, "unaddressable with sample resolver": {
+			dest:            duckv1.Destination{Ref: unaddressableKnativeRef()},
+			customResolvers: []resolver.URIResolverFunc{sampleURIResolver},
+			wantErr:         "cannot be referenced",
 		}}
 
 	for n, tc := range tests {
 		t.Run(n, func(t *testing.T) {
 			ctx, _ := fakedynamicclient.With(context.Background(), scheme.Scheme, tc.objects...)
 			ctx = addressable.WithDuck(ctx)
-			r := resolver.NewURIResolver(ctx, func(types.NamespacedName) {})
+			r := resolver.NewURIResolver(ctx, func(types.NamespacedName) {}, tc.customResolvers...)
 
 			// Run it twice since this should be idempotent. URI Resolver should
 			// not modify the cache's copy.
@@ -791,4 +808,14 @@ func getAddressableFromKRef(ref *duckv1.KReference) *unstructured.Unstructured {
 			},
 		},
 	}
+}
+
+func sampleURIResolver(ctx context.Context, ref *corev1.ObjectReference) (*apis.URL, error) {
+	if ref.Kind == "Service" {
+		return apis.ParseURL(fmt.Sprintf("ref://%s.%s.%s", ref.Name, ref.Kind, ref.APIVersion))
+	}
+	if ref.Kind == unaddressableKind {
+		return nil, errors.New("cannot be referenced")
+	}
+	return nil, nil
 }

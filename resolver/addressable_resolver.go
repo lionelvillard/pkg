@@ -38,16 +38,21 @@ import (
 	"knative.dev/pkg/tracker"
 )
 
+type URIResolverFunc func(ctx context.Context, ref *corev1.ObjectReference) (*apis.URL, error)
+
 // URIResolver resolves Destinations and ObjectReferences into a URI.
 type URIResolver struct {
 	tracker       tracker.Interface
 	listerFactory func(schema.GroupVersionResource) (cache.GenericLister, error)
+	resolvers     []URIResolverFunc
 }
 
 // NewURIResolver constructs a new URIResolver with context and a callback
 // for a given listableType (Listable) passed to the URIResolver's tracker.
-func NewURIResolver(ctx context.Context, callback func(types.NamespacedName)) *URIResolver {
-	ret := &URIResolver{}
+func NewURIResolver(ctx context.Context, callback func(types.NamespacedName), resolvers ...URIResolverFunc) *URIResolver {
+	ret := &URIResolver{
+		resolvers: resolvers,
+	}
 
 	ret.tracker = tracker.New(callback, controller.GetTrackerLease(ctx))
 
@@ -146,6 +151,17 @@ func (r *URIResolver) URIFromKReference(ctx context.Context, ref *duckv1.KRefere
 func (r *URIResolver) URIFromObjectReference(ctx context.Context, ref *corev1.ObjectReference, parent interface{}) (*apis.URL, error) {
 	if ref == nil {
 		return nil, apierrs.NewBadRequest("ref is nil")
+	}
+
+	// try custom resolvers first
+	for _, resolver := range r.resolvers {
+		url, err := resolver(ctx, ref)
+		if err != nil {
+			return nil, err
+		}
+		if url != nil {
+			return url, nil
+		}
 	}
 
 	gvr, _ := meta.UnsafeGuessKindToResource(ref.GroupVersionKind())
